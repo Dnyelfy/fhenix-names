@@ -80,22 +80,53 @@ export default function App() {
     const eth = (window as any).ethereum;
     if (!eth) return say("No wallet found");
 
-    const provider = new BrowserProvider(eth);
+    const provider = new BrowserProvider(eth, "any");
     await provider.send("eth_requestAccounts", []);
 
-    const net = await provider.getNetwork();
+    let net = await provider.getNetwork();
     if (Number(net.chainId) !== ARB_SEPOLIA) {
+      say("Switching to Arbitrum Sepolia...");
       try {
         await eth.request({
           method: "wallet_switchEthereumChain",
           params: [{ chainId: "0x66eee" }],
         });
-      } catch {
-        return say("Switch to Arbitrum Sepolia");
+      } catch (err: any) {
+        // 4902 = chain not added to the wallet yet
+        if (err?.code === 4902) {
+          try {
+            await eth.request({
+              method: "wallet_addEthereumChain",
+              params: [
+                {
+                  chainId: "0x66eee",
+                  chainName: "Arbitrum Sepolia",
+                  nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+                  rpcUrls: ["https://sepolia-rollup.arbitrum.io/rpc"],
+                  blockExplorerUrls: ["https://sepolia.arbiscan.io"],
+                },
+              ],
+            });
+          } catch {
+            return say("Please switch to Arbitrum Sepolia manually");
+          }
+        } else {
+          return say("Please switch to Arbitrum Sepolia manually");
+        }
       }
+      // give the wallet a moment to settle on the new chain
+      await new Promise((r) => setTimeout(r, 600));
     }
 
-    const s = await provider.getSigner();
+    // rebuild the provider AFTER the switch, otherwise ethers keeps the old
+    // chainId and throws "network changed" on every call
+    const p2 = new BrowserProvider(eth, "any");
+    net = await p2.getNetwork();
+    if (Number(net.chainId) !== ARB_SEPOLIA) {
+      return say(`Wrong network (${Number(net.chainId)}). Switch to Arbitrum Sepolia and reconnect.`);
+    }
+
+    const s = await p2.getSigner();
     setSigner(s);
     setAccount(await s.getAddress());
     say("Wallet connected");
@@ -103,7 +134,7 @@ export default function App() {
     say("Initializing CoFHE (first run may take 10-20s)");
     try {
       const r: any = await cofhejs.initializeWithEthers({
-        ethersProvider: provider,
+        ethersProvider: p2,
         ethersSigner: s,
         environment: "TESTNET",
       });
@@ -111,7 +142,7 @@ export default function App() {
       setReady(true);
       say("CoFHE ready");
     } catch (e: any) {
-      say("CoFHE error: " + e.message);
+      say("CoFHE error: " + (e?.message || String(e)));
     }
   }
 
@@ -119,6 +150,19 @@ export default function App() {
     if (!contract || !account) return;
     contract.reverse(account).then(setMyName).catch(() => {});
   }, [contract, account]);
+
+  // wallet-level chain or account switches invalidate the provider entirely
+  useEffect(() => {
+    const eth = (window as any).ethereum;
+    if (!eth?.on) return;
+    const reload = () => window.location.reload();
+    eth.on("chainChanged", reload);
+    eth.on("accountsChanged", reload);
+    return () => {
+      eth.removeListener?.("chainChanged", reload);
+      eth.removeListener?.("accountsChanged", reload);
+    };
+  }, []);
 
   // ------------------------------------------------------ 1. registration
 
