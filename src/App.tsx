@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { BrowserProvider, Contract, keccak256, toUtf8Bytes, JsonRpcSigner } from "ethers";
 import { cofhejs, Encryptable, FheTypes } from "cofhejs/web";
 
-const FHENIX_NAMES_ADDRESS = import.meta.env.VITE_FHENIX_NAMES_ADDRESS as string;
+const FHENIX_NAMES_ADDRESS = "0xD0021bc4f0E4f9ad6F6FAb60151fFf5F335977EB";
 const ARB_SEPOLIA = 421614;
 
 const IN128 = "(uint256 ctHash,uint8 securityZone,uint8 utype,bytes signature)";
@@ -29,14 +29,14 @@ type Step = "idle" | "encrypting" | "claiming" | "waiting" | "settling" | "done"
 
 const PROFILE_FIELDS = [
   { label: "Telegram", key: "telegram" },
-  { label: "E-posta", key: "email" },
-  { label: "Not", key: "note" },
+  { label: "Email", key: "email" },
+  { label: "Note", key: "note" },
 ];
 
 // en fazla 16 byte metni uint128'e cevirir
 function textToUint(s: string): bigint {
   const b = toUtf8Bytes(s);
-  if (b.length > 16) throw new Error("En fazla 16 karakter");
+  if (b.length > 16) throw new Error("Max 16 characters");
   if (b.length === 0) return 0n;
   let hex = "0x";
   for (const x of b) hex += x.toString(16).padStart(2, "0");
@@ -74,11 +74,11 @@ export default function App() {
     [signer]
   );
 
-  // ------------------------------------------------------------ baglanti
+  // ------------------------------------------------------------- connect
 
   async function connect() {
     const eth = (window as any).ethereum;
-    if (!eth) return say("Cuzdan bulunamadi");
+    if (!eth) return say("No wallet found");
 
     const provider = new BrowserProvider(eth);
     await provider.send("eth_requestAccounts", []);
@@ -91,27 +91,27 @@ export default function App() {
           params: [{ chainId: "0x66eee" }],
         });
       } catch {
-        return say("Arbitrum Sepolia'ya gec");
+        return say("Switch to Arbitrum Sepolia");
       }
     }
 
     const s = await provider.getSigner();
     setSigner(s);
     setAccount(await s.getAddress());
-    say("Cuzdan bagli");
+    say("Wallet connected");
 
-    say("CoFHE baslatiliyor (ilk seferde 10-20 sn surebilir)");
+    say("Initializing CoFHE (first run may take 10-20s)");
     try {
       const r: any = await cofhejs.initializeWithEthers({
         ethersProvider: provider,
         ethersSigner: s,
         environment: "TESTNET",
       });
-      if (r && r.success === false) throw new Error(r.error?.message || "init hatasi");
+      if (r && r.success === false) throw new Error(r.error?.message || "init failed");
       setReady(true);
-      say("CoFHE hazir");
+      say("CoFHE ready");
     } catch (e: any) {
-      say("CoFHE hatasi: " + e.message);
+      say("CoFHE error: " + e.message);
     }
   }
 
@@ -120,7 +120,7 @@ export default function App() {
     contract.reverse(account).then(setMyName).catch(() => {});
   }, [contract, account]);
 
-  // -------------------------------------------------------- 1. kayit akisi
+  // ------------------------------------------------------ 1. registration
 
   const [name, setName] = useState("");
   const [step, setStep] = useState<Step>("idle");
@@ -131,9 +131,9 @@ export default function App() {
     if (!contract) return;
     try {
       const ok = await contract.isAvailable(name);
-      say(ok ? `${name}.fhenix musait` : `${name}.fhenix alinmis veya gecersiz`);
+      say(ok ? `${name}.fhenix is available` : `${name}.fhenix is taken or invalid`);
     } catch (e: any) {
-      say("Hata: " + e.message);
+      say("Error: " + e.message);
     }
   }
 
@@ -145,7 +145,7 @@ export default function App() {
       const hi = h >> 128n;
       const lo = h & MASK128;
 
-      say("Isim hash'i ikiye bolunup sifreleniyor");
+      say("Splitting name hash in two and encrypting");
       const enc: any = await cofhejs.encrypt(() => {}, [
         Encryptable.uint128(hi),
         Encryptable.uint128(lo),
@@ -155,7 +155,7 @@ export default function App() {
 
       setStep("claiming");
       const tx = await contract.claim(encHi, encLo);
-      say("claim gonderildi: " + tx.hash.slice(0, 18) + "...");
+      say("claim sent: " + tx.hash.slice(0, 18) + "...");
       const rc = await tx.wait();
 
       let id: bigint | null = null;
@@ -167,11 +167,11 @@ export default function App() {
       }
       setClaimId(id);
       setDecReady(false);
-      say(`Talep kaydedildi, id = ${id}. Sira zincirde kilitlendi.`);
+      say(`Claim recorded, id = ${id}. Order locked on-chain.`);
       setStep("waiting");
     } catch (e: any) {
       setStep("idle");
-      say("Hata: " + (e.shortMessage || e.message));
+      say("Error: " + (e.shortMessage || e.message));
     }
   }
 
@@ -184,7 +184,7 @@ export default function App() {
         const ok = await contract.claimReady(claimId);
         if (ok && alive) {
           setDecReady(true);
-          say("Coprocessor cozdu, sonuclandirabilirsin");
+          say("Coprocessor decrypted, you can settle now");
           clearInterval(t);
         }
       } catch {}
@@ -200,22 +200,22 @@ export default function App() {
     try {
       setStep("settling");
       const tx = await contract.settle(claimId, name);
-      say("settle gonderildi: " + tx.hash.slice(0, 18) + "...");
+      say("settle sent: " + tx.hash.slice(0, 18) + "...");
       await tx.wait();
       setStep("done");
       setMyName(name);
-      say(`${name}.fhenix kaydedildi`);
+      say(`${name}.fhenix registered`);
     } catch (e: any) {
       setStep("waiting");
       const m = e.shortMessage || e.message || "";
-      if (m.includes("DecryptPending")) say("Henuz cozulmedi, birkac saniye daha bekle");
-      else if (m.includes("NameTaken")) say("Isim baskasi tarafindan alinmis");
-      else if (m.includes("HashMismatch")) say("Isim talep ettiginden farkli");
-      else say("Hata: " + m);
+      if (m.includes("DecryptPending")) say("Not decrypted yet, wait a few more seconds");
+      else if (m.includes("NameTaken")) say("Name already taken by someone else");
+      else if (m.includes("HashMismatch")) say("Name differs from the one you claimed");
+      else say("Error: " + m);
     }
   }
 
-  // ---------------------------------------------------------- 2. cozumleme
+  // ------------------------------------------------------------ 2. resolve
 
   const [lookup, setLookup] = useState("");
   const [lookupResult, setLookupResult] = useState("");
@@ -225,19 +225,19 @@ export default function App() {
     try {
       if (lookup.startsWith("0x")) {
         const n = await contract.reverse(lookup);
-        setLookupResult(n ? `${n}.fhenix` : "kayit yok");
+        setLookupResult(n ? `${n}.fhenix` : "no record");
       } else {
         const a = await contract.resolve(lookup);
         setLookupResult(
-          a === "0x0000000000000000000000000000000000000000" ? "kayit yok" : a
+          a === "0x0000000000000000000000000000000000000000" ? "no record" : a
         );
       }
     } catch (e: any) {
-      setLookupResult("hata: " + e.message);
+      setLookupResult("error: " + e.message);
     }
   }
 
-  // ------------------------------------------------------- 3. sifreli profil
+  // ---------------------------------------------------- 3. private profile
 
   const [fieldKey, setFieldKey] = useState("telegram");
   const [fieldValue, setFieldValue] = useState("");
@@ -249,16 +249,16 @@ export default function App() {
   async function saveField() {
     if (!contract || !ready || !myName) return;
     try {
-      say("Alan sifreleniyor");
+      say("Encrypting field");
       const v = textToUint(fieldValue);
       const enc: any = await cofhejs.encrypt(() => {}, [Encryptable.uint128(v)]);
       if (enc && enc.success === false) throw new Error(enc.error?.message);
 
       const tx = await contract.setProfile(myName, keyHash(fieldKey), enc.data[0]);
       await tx.wait();
-      say(`${fieldKey} sifreli olarak kaydedildi`);
+      say(`${fieldKey} saved encrypted`);
     } catch (e: any) {
-      say("Hata: " + (e.shortMessage || e.message));
+      say("Error: " + (e.shortMessage || e.message));
     }
   }
 
@@ -266,15 +266,15 @@ export default function App() {
     if (!contract || !ready || !myName) return;
     try {
       const handle = await contract.getProfile(myName, keyHash(k));
-      if (handle === 0n) return say(`${k} bos`);
+      if (handle === 0n) return say(`${k} is empty`);
 
       const r: any = await cofhejs.unseal(handle, FheTypes.Uint128);
       if (r && r.success === false) throw new Error(r.error?.message);
 
       setDecrypted((d) => ({ ...d, [k]: uintToText(BigInt(r.data)) }));
-      say(`${k} cozuldu, sadece senin tarayicinda`);
+      say(`${k} decrypted, in your browser only`);
     } catch (e: any) {
-      say("Hata: " + (e.shortMessage || e.message));
+      say("Error: " + (e.shortMessage || e.message));
     }
   }
 
@@ -283,9 +283,9 @@ export default function App() {
     try {
       const tx = await contract.shareProfile(myName, keyHash(fieldKey), viewer);
       await tx.wait();
-      say(`${viewer.slice(0, 10)}... artik ${fieldKey} alanini cozebilir`);
+      say(`${viewer.slice(0, 10)}... can now decrypt ${fieldKey}`);
     } catch (e: any) {
-      say("Hata: " + (e.shortMessage || e.message));
+      say("Error: " + (e.shortMessage || e.message));
     }
   }
 
@@ -299,18 +299,18 @@ export default function App() {
             <h1 style={S.h1}>
               Fhenix<span style={{ opacity: 0.4 }}>Names</span>
             </h1>
-            <p style={S.sub}>Front-run edilemeyen isim kaydi · Fhenix CoFHE</p>
+            <p style={S.sub}>Front-run resistant name registration · Fhenix CoFHE</p>
           </div>
           {account ? (
             <div style={S.badge}>
-              <div style={{ fontWeight: 600 }}>{myName ? `${myName}.fhenix` : "isim yok"}</div>
+              <div style={{ fontWeight: 600 }}>{myName ? `${myName}.fhenix` : "no name"}</div>
               <div style={{ opacity: 0.5, fontSize: 12 }}>
                 {account.slice(0, 6)}...{account.slice(-4)}
               </div>
             </div>
           ) : (
             <button style={S.btn} onClick={connect}>
-              Cuzdani bagla
+              Connect wallet
             </button>
           )}
         </header>
@@ -322,7 +322,7 @@ export default function App() {
               onClick={() => setTab(t)}
               style={{ ...S.tab, ...(tab === t ? S.tabOn : {}) }}
             >
-              {t === "register" ? "Kayit" : t === "lookup" ? "Cozumle" : "Sifreli profil"}
+              {t === "register" ? "Register" : t === "lookup" ? "Resolve" : "Private profile"}
             </button>
           ))}
         </div>
@@ -338,17 +338,17 @@ export default function App() {
               />
               <span style={S.tld}>.fhenix</span>
               <button style={S.btnGhost} onClick={checkAvailable}>
-                Sorgula
+                Check
               </button>
             </div>
 
             <div style={S.steps}>
               <div style={{ ...S.stepBox, ...(claimId ? S.stepDone : {}) }}>
-                <b>1 · Sifreli talep</b>
+                <b>1 · Encrypted claim</b>
                 <p style={S.stepText}>
-                  keccak256(isim) ikiye bolunup tarayicinda sifrelenir. Mempool'daki bot
-                  sadece ciphertext handle'i gorur, ismi cikaramaz. Sira bu islemde
-                  zincirde kilitlenir.
+                  keccak256(name) is split in two and encrypted in your browser. A bot
+                  watching the mempool sees only ciphertext handles and cannot recover the
+                  name. Your position in line is locked by this transaction.
                 </p>
                 <button
                   style={S.btn}
@@ -356,33 +356,33 @@ export default function App() {
                   onClick={doClaim}
                 >
                   {step === "encrypting"
-                    ? "Sifreleniyor..."
+                    ? "Encrypting..."
                     : step === "claiming"
-                    ? "Gonderiliyor..."
-                    : "Talep et"}
+                    ? "Sending..."
+                    : "Claim"}
                 </button>
               </div>
 
               <div style={{ ...S.stepBox, ...(claimId ? {} : { opacity: 0.35 }) }}>
-                <b>2 · Sonuclandir</b>
+                <b>2 · Settle</b>
                 <p style={S.stepText}>
                   {claimId && !decReady
-                    ? "Coprocessor cozuyor, bekle..."
-                    : "Ismi acik gonderirsin, kontrat keccak ile dogrular. Sira 1. adimda belirlendigi icin ismin burada gorunmesi zararsiz."}
+                    ? "Coprocessor is decrypting, hold on..."
+                    : "You send the name in the clear and the contract verifies it with keccak. Since order was fixed in step 1, revealing the name here is harmless."}
                 </p>
                 <button
                   style={S.btn}
                   disabled={claimId === null || !decReady || step === "settling"}
                   onClick={doSettle}
                 >
-                  {step === "settling" ? "Kaydediliyor..." : "Sonuclandir"}
+                  {step === "settling" ? "Registering..." : "Settle"}
                 </button>
               </div>
             </div>
 
             <div style={S.note}>
-              ENS burada commit-reveal kullanmak zorunda: 2 islem, 60 saniye bekleme,
-              kullanicinin secret'i lokalde saklamasi gerekiyor. Burada secret yok.
+              ENS has to use commit-reveal here: two transactions, a 60 second wait, and
+              the user must keep a secret locally. There is no secret to keep here.
             </div>
           </div>
         )}
@@ -392,12 +392,12 @@ export default function App() {
             <div style={S.row}>
               <input
                 style={S.input}
-                placeholder="isim veya 0x adres"
+                placeholder="name or 0x address"
                 value={lookup}
                 onChange={(e) => setLookup(e.target.value)}
               />
               <button style={S.btn} onClick={doLookup}>
-                Cozumle
+                Resolve
               </button>
             </div>
             {lookupResult && <div style={S.result}>{lookupResult}</div>}
@@ -407,7 +407,7 @@ export default function App() {
         {tab === "profile" && (
           <div style={S.card}>
             {!myName ? (
-              <div style={S.note}>Once bir isim kaydet.</div>
+              <div style={S.note}>Register a name first.</div>
             ) : (
               <>
                 <div style={S.row}>
@@ -424,12 +424,12 @@ export default function App() {
                   </select>
                   <input
                     style={S.input}
-                    placeholder="deger (en fazla 16 karakter)"
+                    placeholder="value (max 16 characters)"
                     value={fieldValue}
                     onChange={(e) => setFieldValue(e.target.value)}
                   />
                   <button style={S.btn} onClick={saveField}>
-                    Sifrele ve kaydet
+                    Encrypt and save
                   </button>
                 </div>
 
@@ -441,11 +441,11 @@ export default function App() {
                         <div
                           style={{ opacity: 0.6, fontSize: 13, fontFamily: "monospace" }}
                         >
-                          {decrypted[f.key] ?? "••••••••  (zincirde sifreli)"}
+                          {decrypted[f.key] ?? "••••••••  (encrypted on-chain)"}
                         </div>
                       </div>
                       <button style={S.btnGhost} onClick={() => readField(f.key)}>
-                        Coz
+                        Decrypt
                       </button>
                     </div>
                   ))}
@@ -454,19 +454,19 @@ export default function App() {
                 <div style={{ ...S.row, marginTop: 20 }}>
                   <input
                     style={S.input}
-                    placeholder="0x... izin verilecek adres"
+                    placeholder="0x... address to grant"
                     value={viewer}
                     onChange={(e) => setViewer(e.target.value)}
                   />
                   <button style={S.btnGhost} onClick={share}>
-                    Bu adrese ac
+                    Grant access
                   </button>
                 </div>
 
                 <div style={S.note}>
-                  Alanlar zincirde ciphertext olarak duruyor. Varsayilan olarak sadece sen
-                  cozebilirsin. Izin verdigin adres kendi tarayicisinda cozer, deger hicbir
-                  zaman zincirde acik gorunmez.
+                  Fields are stored on-chain as ciphertext. By default only you can decrypt
+                  them. An address you grant decrypts in its own browser; the value is never
+                  exposed on-chain.
                 </div>
               </>
             )}
@@ -475,7 +475,7 @@ export default function App() {
 
         <div style={S.logBox}>
           {log.length === 0 ? (
-            <div style={{ opacity: 0.35 }}>islem gunlugu</div>
+            <div style={{ opacity: 0.35 }}>activity log</div>
           ) : (
             log.map((l, i) => (
               <div key={i} style={{ opacity: i === 0 ? 1 : 0.5 }}>
